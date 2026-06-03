@@ -2350,4 +2350,16 @@ pub mod tests {
 
         let _backwards_compatible: GraphSettings = serde_json::from_str(old_format_json).unwrap();
     }
+
+    #[test]
+    fn positive_lookup_safety_margin_excludes_positive_minimum() {
+        let observed_lookup_range = (5, 7);
+        let safe_lookup_range = GraphCircuit::calc_safe_lookup_range(observed_lookup_range, 2.0);
+
+        assert_eq!(safe_lookup_range, (10, 14));
+        assert!(
+            safe_lookup_range.0 <= observed_lookup_range.0,
+            "calibrated lookup lower bound must include observed witness value"
+        );
+    }
 }

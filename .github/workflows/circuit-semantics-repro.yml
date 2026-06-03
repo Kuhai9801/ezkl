@@ -1,0 +1,198 @@
+name: Circuit Semantics Repro
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - ezkl-circuit-semantics-repro
+
+env:
+  CARGO_TERM_COLOR: always
+  OPENSSL_NO_VENDOR: 1
+  RUSTFLAGS: "-C linker=gcc"
+
+jobs:
+  repro:
+    permissions:
+      contents: read
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+
+      - uses: actions-rust-lang/setup-rust-toolchain@fb51252c7ba57d633bc668f941da052e410add48
+        with:
+          toolchain: nightly-2025-12-01
+          override: true
+          components: rustfmt, clippy
+
+      - name: Install build dependencies
+        run: sudo apt-get update && sudo apt-get install -y cmake build-essential g++ gcc libclang-dev llvm-dev libstdc++-12-dev libc6-dev libssl-dev pkg-config
+
+      - name: Run focused repro tests
+        shell: bash
+        run: |
+          set +e
+
+          cargo test --features ezkl positive_lookup_safety_margin_excludes_positive_minimum -- --nocapture
+          lookup_status=$?
+
+          cargo test --features ezkl int64_tensor_extraction_preserves_exact_integer_value -- --nocapture
+          int64_status=$?
+
+          cargo test --features ezkl swap_proof_commitments_rejects_empty_commitment_list -- --nocapture
+          polycommit_status=$?
+
+          cargo test --features ezkl constant_division_relation_is_not_unique_for_rounding_ties -- --nocapture
+          div_status=$?
+
+          echo "positive_lookup_safety_margin_excludes_positive_minimum=$lookup_status"
+          echo "int64_tensor_extraction_preserves_exact_integer_value=$int64_status"
+          echo "swap_proof_commitments_rejects_empty_commitment_list=$polycommit_status"
+          echo "constant_division_relation_is_not_unique_for_rounding_ties=$div_status"
+
+          if [[ $lookup_status -ne 0 || $int64_status -ne 0 || $polycommit_status -ne 0 || $div_status -ne 0 ]]; then
+            exit 1
+          fi
+
+      - name: Run CLI artifact repros
+        if: always()
+        shell: bash
+        run: |
+          set +e
+
+          python -m pip install onnx
+
+          mkdir -p /tmp/ezkl-int64-artifact
+          python - <<'PY'
+          import json
+          import onnx
+          from onnx import TensorProto, helper, numpy_helper
+          import numpy as np
+
+          x = helper.make_tensor_value_info("x", TensorProto.INT64, [1])
+          y = helper.make_tensor_value_info("y", TensorProto.INT64, [1])
+          c = numpy_helper.from_array(np.array([16_777_217], dtype=np.int64), name="c")
+          node = helper.make_node("Add", ["x", "c"], ["y"])
+          graph = helper.make_graph([node], "int64_constant_add", [x], [y], [c])
+          model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 13)])
+          onnx.save(model, "/tmp/ezkl-int64-artifact/network.onnx")
+
+          with open("/tmp/ezkl-int64-artifact/input.json", "w") as f:
+              json.dump({"input_data": [[0]]}, f)
+          PY
+
+          cargo run --features ezkl --bin ezkl -- gen-settings \
+            -M /tmp/ezkl-int64-artifact/network.onnx \
+            -O /tmp/ezkl-int64-artifact/settings.json
+          int64_settings_status=$?
+
+          cargo run --features ezkl --bin ezkl -- compile-circuit \
+            -M /tmp/ezkl-int64-artifact/network.onnx \
+            --compiled-circuit /tmp/ezkl-int64-artifact/network.compiled \
+            -S /tmp/ezkl-int64-artifact/settings.json
+          int64_compile_status=$?
+
+          cargo run --features ezkl --bin ezkl -- gen-witness \
+            -D /tmp/ezkl-int64-artifact/input.json \
+            -M /tmp/ezkl-int64-artifact/network.compiled \
+            -O /tmp/ezkl-int64-artifact/witness.json
+          int64_witness_status=$?
+
+          cargo run --features ezkl --bin ezkl -- mock \
+            -W /tmp/ezkl-int64-artifact/witness.json \
+            -M /tmp/ezkl-int64-artifact/network.compiled
+          int64_mock_status=$?
+
+          int64_logrows=$(python - <<'PY'
+          import json
+          print(json.load(open("/tmp/ezkl-int64-artifact/settings.json"))["run_args"]["logrows"])
+          PY
+          )
+
+          cargo run --features ezkl --bin ezkl -- gen-srs \
+            --srs-path /tmp/ezkl-int64-artifact/kzg.srs \
+            --logrows "$int64_logrows"
+          int64_srs_status=$?
+
+          cargo run --features ezkl --bin ezkl -- setup \
+            -M /tmp/ezkl-int64-artifact/network.compiled \
+            --srs-path /tmp/ezkl-int64-artifact/kzg.srs \
+            --vk-path /tmp/ezkl-int64-artifact/vk.key \
+            --pk-path /tmp/ezkl-int64-artifact/pk.key \
+            --disable-selector-compression
+          int64_setup_status=$?
+
+          cargo run --features ezkl --bin ezkl -- prove \
+            -W /tmp/ezkl-int64-artifact/witness.json \
+            -M /tmp/ezkl-int64-artifact/network.compiled \
+            --srs-path /tmp/ezkl-int64-artifact/kzg.srs \
+            --pk-path /tmp/ezkl-int64-artifact/pk.key \
+            --proof-path /tmp/ezkl-int64-artifact/proof.json \
+            --check-mode safe
+          int64_prove_status=$?
+
+          cargo run --features ezkl --bin ezkl -- verify \
+            --settings-path /tmp/ezkl-int64-artifact/settings.json \
+            --proof-path /tmp/ezkl-int64-artifact/proof.json \
+            --vk-path /tmp/ezkl-int64-artifact/vk.key \
+            --srs-path /tmp/ezkl-int64-artifact/kzg.srs
+          int64_verify_status=$?
+
+          if [[ -f /tmp/ezkl-int64-artifact/witness.json ]]; then
+            python - <<'PY'
+          import json
+          witness = json.load(open("/tmp/ezkl-int64-artifact/witness.json"))
+          print("int64 witness pretty rescaled outputs:", witness.get("pretty_elements", {}).get("rescaled_outputs"))
+          print("int64 witness raw outputs:", witness.get("outputs"))
+          if "/tmp/ezkl-int64-artifact/proof.json":
+              try:
+                  proof = json.load(open("/tmp/ezkl-int64-artifact/proof.json"))
+                  print("int64 proof instances:", proof.get("instances"))
+                  print("int64 proof pretty public inputs:", proof.get("pretty_public_inputs"))
+              except FileNotFoundError:
+                  print("int64 proof artifact missing")
+          values = witness.get("pretty_elements", {}).get("rescaled_outputs") or []
+          flattened = [v for row in values for v in row]
+          if "16777217" not in flattened:
+              raise SystemExit("witness artifact does not preserve ONNX INT64 constant 16777217")
+          PY
+            int64_artifact_status=$?
+          else
+            int64_artifact_status=1
+          fi
+
+          mkdir -p /tmp/ezkl-polycommit-artifact
+          cp tests/assets/proof.json /tmp/ezkl-polycommit-artifact/proof.json
+          cp tests/assets/witness.json /tmp/ezkl-polycommit-artifact/witness.json
+          before_hash=$(sha256sum /tmp/ezkl-polycommit-artifact/proof.json | cut -d' ' -f1)
+
+          cargo run --features ezkl --bin ezkl -- swap-proof-commitments \
+            --proof-path /tmp/ezkl-polycommit-artifact/proof.json \
+            --witness-path /tmp/ezkl-polycommit-artifact/witness.json
+          polycommit_cli_status=$?
+
+          after_hash=$(sha256sum /tmp/ezkl-polycommit-artifact/proof.json | cut -d' ' -f1)
+          echo "polycommit before=$before_hash after=$after_hash status=$polycommit_cli_status"
+          if [[ $polycommit_cli_status -eq 0 && "$before_hash" == "$after_hash" ]]; then
+            polycommit_artifact_status=1
+          else
+            polycommit_artifact_status=0
+          fi
+
+          echo "int64_settings_status=$int64_settings_status"
+          echo "int64_compile_status=$int64_compile_status"
+          echo "int64_witness_status=$int64_witness_status"
+          echo "int64_mock_status=$int64_mock_status"
+          echo "int64_srs_status=$int64_srs_status"
+          echo "int64_setup_status=$int64_setup_status"
+          echo "int64_prove_status=$int64_prove_status"
+          echo "int64_verify_status=$int64_verify_status"
+          echo "int64_artifact_status=$int64_artifact_status"
+          echo "polycommit_cli_status=$polycommit_cli_status"
+          echo "polycommit_artifact_status=$polycommit_artifact_status"
+
+          if [[ $int64_settings_status -ne 0 || $int64_compile_status -ne 0 || $int64_witness_status -ne 0 || $int64_mock_status -ne 0 || $int64_srs_status -ne 0 || $int64_setup_status -ne 0 || $int64_prove_status -ne 0 || $int64_verify_status -ne 0 || $int64_artifact_status -ne 0 || $polycommit_artifact_status -ne 0 ]]; then
+            exit 1
+          fi

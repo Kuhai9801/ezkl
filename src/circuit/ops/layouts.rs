@@ -6778,3 +6778,33 @@ pub fn output<F: PrimeField + TensorType + PartialOrd + std::hash::Hash>(
     // regular equality constraint
     enforce_equality(config, region, &[&values[0], &values[1]])
 }
+
+#[cfg(test)]
+mod principal_repro_tests {
+    use super::*;
+    use halo2curves::bn256::Fr as Fp;
+
+    #[test]
+    fn constant_division_relation_is_not_unique_for_rounding_ties() {
+        let config = BaseConfig::dummy(12, 2);
+        let mut region = RegionCtx::new_dummy(
+            0,
+            2,
+            crate::circuit::region::RegionSettings::all_true(65536, 4),
+        );
+
+        let input = ValTensor::<Fp>::from_integer_rep_tensor(
+            Tensor::<IntegerRep>::new(Some(&[5]), &[1]).unwrap(),
+        );
+        let alternate_product = ValTensor::<Fp>::from_integer_rep_tensor(
+            Tensor::<IntegerRep>::new(Some(&[0]), &[1]).unwrap(),
+        );
+
+        assert_eq!(
+            tensor::ops::nonlinearities::const_div(&input.int_evals().unwrap(), 10.0)[0],
+            1
+        );
+        diff_less_than(&config, &mut region, &[&input, &alternate_product], Fp::from(10))
+            .expect("alternate quotient relation should currently satisfy diff_less_than");
+    }
+}

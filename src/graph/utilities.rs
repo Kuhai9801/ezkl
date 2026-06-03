@@ -1687,4 +1687,18 @@ pub mod tests {
         assert_eq!(split[2].dims(), vec![5, 2]);
         assert_eq!(split[2].len(), 10);
     }
+
+    #[cfg(all(feature = "ezkl", not(target_arch = "wasm32")))]
+    #[test]
+    fn int64_tensor_extraction_preserves_exact_integer_value() {
+        let source = 16_777_217_i64;
+        let tract_tensor = tract_onnx::prelude::Tensor::from_shape(&[1], &[source]).unwrap();
+        let extracted = extract_tensor_value(std::sync::Arc::new(tract_tensor)).unwrap();
+
+        assert_eq!(extracted[0], source as f32);
+        assert_eq!(
+            extracted[0] as i64, source,
+            "ONNX integer constants must not round through f32 before circuit lowering"
+        );
+    }
 }

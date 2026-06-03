@@ -727,4 +727,31 @@ mod tests {
         assert_eq!(snark.instances, snark2.instances);
         assert_eq!(snark.proof, snark2.proof);
     }
+
+    #[test]
+    fn swap_proof_commitments_rejects_empty_commitment_list() {
+        use snark_verifier::system::halo2::transcript::evm::EvmTranscript;
+
+        let snark = Snark::<Fr, G1Affine> {
+            proof: vec![1, 2, 3, 4],
+            instances: vec![],
+            protocol: None,
+            hex_proof: None,
+            split: None,
+            pretty_public_inputs: None,
+            timestamp: None,
+            version: None,
+        };
+
+        let swapped = swap_proof_commitments::<
+            KZGCommitmentScheme<Bn256>,
+            _,
+            EvmTranscript<G1Affine, _, _, _>,
+        >(&snark, &[]);
+
+        assert!(
+            swapped.is_err(),
+            "proof-swap should not succeed when the witness has no polycommit commitments"
+        );
+    }
 }
